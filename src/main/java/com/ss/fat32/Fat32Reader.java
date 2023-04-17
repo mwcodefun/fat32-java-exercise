@@ -6,7 +6,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.StringJoiner;
 
 public class Fat32Reader {
 
@@ -36,6 +39,9 @@ public class Fat32Reader {
         private int rootClus;
         private int fsInfo;
         private int bkBootSec;
+        private int numHeads;
+        private long hiddSec;
+        private long totSec32;
 
         @Override
         public String toString() {
@@ -60,15 +66,16 @@ public class Fat32Reader {
                     .toString();
         }
 
-        public static int read4Bytes(ByteBuffer buffer) {
+        public static long readUnsignedInt(ByteBuffer buffer){
+            byte b = buffer.get();
             byte b1 = buffer.get();
             byte b2 = buffer.get();
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            return b1 | b2 << 8;
+            byte b3 = buffer.get();
+            return b & 0xFF | (b1 & 0xFF) << 8 | (b2 & 0xFF) << 16 | (b3 & 0xFF) << 24;
         }
 
-
         public static BpbHeader READ_FROM_BUFFER(ByteBuffer buffer) {
+            buffer.order(ByteOrder.LITTLE_ENDIAN);
             BpbHeader bpbHeader = new BpbHeader();
             bpbHeader.jmpBoot[0] = buffer.get();
             bpbHeader.jmpBoot[1] = buffer.get();
@@ -86,7 +93,16 @@ public class Fat32Reader {
             bpbHeader.media = buffer.get();
             bpbHeader.fatSz16 = read2Bytes(buffer);
             bpbHeader.secPerTrk = read2Bytes(buffer);
-            buffer.position(36);
+            bpbHeader.numHeads = read2Bytes(buffer);
+            bpbHeader.hiddSec = readUnsignedInt(buffer);
+            bpbHeader.totSec32 = readUnsignedInt(buffer);
+            byte[] totSec32 = new byte[4];
+            int position = buffer.position();
+            buffer.position(0);
+            buffer.get(32,totSec32);
+            buffer.position(position);
+            System.out.println(Utils.toInt(totSec32));
+
             buffer.order(ByteOrder.LITTLE_ENDIAN);
             bpbHeader.fatSz32 = buffer.getInt();
             bpbHeader.extFlags = read2Bytes(buffer);
@@ -141,14 +157,13 @@ public class Fat32Reader {
 
     BpbHeader bpbHeader;
 
-    private int maxCluster;
+    private long maxCluster;
     private static int BAD_CLUSTER_ID = 0xffffff7;
     FileChannel fileChannel;
 
     RandomAccessFile randomAccessFile;
 
-    public List<Dir> readDirContent(Dir dir) {
-        int cluster = dir.getCluNum();
+    public List<Dir> readClusterDir(int cluster) {
         ByteBuffer byteBuffer = readClusterContent(cluster);
         int entrySize = byteBuffer.capacity() / 32;
         List<Dir> ans = new ArrayList<>();
@@ -176,6 +191,26 @@ public class Fat32Reader {
         return ans;
     }
 
+    public List<Dir> readDirContent(Dir dir){
+        int clusterNum = dir.getCluNum();
+        List<Dir> dirs = new ArrayList<>();
+        while (true){
+            if (clusterNum == 0x0){
+                break;
+            }
+            if(clusterNum == BAD_CLUSTER_ID){
+                break;
+            }
+            if (clusterNum >= 0x02 && clusterNum <= this.maxCluster){
+                dirs.addAll(readClusterDir(clusterNum));
+                clusterNum = readFatEntry(clusterNum);
+            }else{
+                break;
+            }
+        }
+        return dirs;
+    }
+
 
     public void read(String path) throws IOException {
         this.randomAccessFile = new RandomAccessFile(path, "rw");
@@ -183,13 +218,16 @@ public class Fat32Reader {
         this.mappedByteBuffer = this.fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, this.fileChannel.size());
         MappedByteBuffer firstSector = this.mappedByteBuffer.slice(0, 512);
         this.bpbHeader = BpbHeader.READ_FROM_BUFFER(firstSector);
-        this.maxCluster = 0;
+        long dataSector = this.bpbHeader.totSec32 - this.bpbHeader.rsvdSecCnt - this.bpbHeader.numFats * this.bpbHeader.fatSz32;
+        this.maxCluster = dataSector / this.bpbHeader.secPerClu;
+        assert this.maxCluster > 0;
         Dir dir = readRootDir();
         System.out.println("root dir=" + dir + "\nrootClu=" + dir.getCluNum());
-        List<Dir> dirs = readDirContent(dir);
-        for (Dir d : dirs) {
-            System.out.println(d.fileName);
+        List<Dir> dirs1 = readDirContent(dir);
+        for (Dir dir1 : dirs1) {
+            System.out.println(dir1.fileName);
         }
+        System.out.println("total=" + dirs1.size());
     }
 
     private Dir readRootDir() {
@@ -215,18 +253,6 @@ public class Fat32Reader {
         return ans << 8 | b1 & 0xff;
     }
 
-    private boolean readToChars(char[] dst, ByteBuffer src, int length) {
-        for (int i = 0; i < length; i++) {
-            char aChar = src.getChar();
-            if (aChar == '\u0000') {
-                src.position(src.position() + (length - i - 1) * 2);
-                return true;
-            }
-            dst[i] = aChar;
-        }
-        return false;
-    }
-
     private void readToBytes(byte[] dst, ByteBuffer src, int length) {
         for (int i = 0; i < length; i++) {
             dst[i] = src.get();
@@ -250,26 +276,54 @@ public class Fat32Reader {
         dir.fstClusLO = read2Bytes(b);
         dir.dirFileSize = b.getInt();
         if (longNameEntries != null && !longNameEntries.isEmpty()){
-            StringBuffer stringBuffer = new StringBuffer();
-            for (int i = longNameEntries.size(); i > 0; i--) {
-                LongNameEntry longNameEntry = longNameEntries.get(i - 1).longNameEntry;
-                stringBuffer.append(longNameEntry.ldirName1);
-                stringBuffer.append(longNameEntry.ldirName2);
-                stringBuffer.append(longNameEntry.ldirName3);
-            }
-            dir.fileName = stringBuffer.toString();
+            dir.fileName = getFileName(longNameEntries);
         }else{
-            String prefix = new String(dir.dirName,0,8);
-            String suffix = new String(dir.dirName,8,3);
-            if (suffix.equals("   ")) {
-                dir.fileName = prefix;
-            }else{
-                dir.fileName = prefix + "." + suffix;
-            }
+            dir.fileName = getShortName(dir);
         }
         assert dir.dirNTRes == 0;
         return dir;
     }
+
+    public String getFileName(List<FatDirEntry> list){
+        StringBuffer sb = new StringBuffer();
+        if (list != null && !list.isEmpty()) {
+            for (int i = list.size(); i > 0; i--) {
+                char[] chars = new char[13];
+                LongNameEntry e = list.get(i - 1).longNameEntry;
+                System.arraycopy(e.ldirName1, 0, chars, 0, 5);
+                System.arraycopy(e.ldirName2, 0, chars, 5, 6);
+                System.arraycopy(e.ldirName3, 0, chars, 11, 2);
+                for (char c : chars) {
+                    if (c == '\u0000') {
+                        break;
+                    }
+                    sb.append(c);
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    public String getShortName(Dir dir){
+        byte[] bytes = dir.dirName;
+        if (bytes[0] == 0){
+            return null;
+        }
+        if (bytes[0] == 0xe5){
+            return null;
+        }
+        if (bytes[0] == 0x05){
+            bytes[0] = (byte) 0xe5;
+        }
+        String main = new String(bytes,0,8);
+        String ext = new String(bytes,8,3);
+        if (ext.trim().length() > 0){
+            return main + '.' + ext;
+        }
+        return main;
+
+    }
+
 
     public int readFatEntry(int clusterNum) {
         int fatOffset = clusterNum * 4;
