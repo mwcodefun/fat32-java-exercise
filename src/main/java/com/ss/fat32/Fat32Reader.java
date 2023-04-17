@@ -147,58 +147,6 @@ public class Fat32Reader {
 
     RandomAccessFile randomAccessFile;
 
-
-
-    public Dir readDirWithLongName(ByteBuffer b) {
-        ArrayList<LongNameEntry> longNameEntries = new ArrayList<>();
-//        if (longNameEntry.ldirOrd  != 0x40){
-//            throw new IllegalStateException("read not first long name entry");
-//        }
-        LongNameEntry last = null;
-        LongNameEntry entry = null;
-        while (true) {
-            int startp = b.position();
-            try {
-                entry = readLongNameDir(b);
-                if (last != null){
-                    int order = last.ldirOrd & 0x1111111;
-                    if (order - entry.ldirOrd == 1){
-                        longNameEntries.add(last);
-                    }
-                }
-                assert entry.ldirType == 0;
-                assert entry.ldirFstClusLO[0] == 0;
-                assert entry.ldirFstClusLO[1] == 0;
-                if (entry.ldirOrd == (0x01 | 0x40)) {
-                    break;
-                }
-                if (entry.ldirOrd == 0x01) {
-                    break;
-                }
-                last = entry;
-            } catch (Exception e) {
-                b.position(startp);
-                break;
-            }
-        }
-        if (entry != null){
-            longNameEntries.add(entry);
-        }
-        Dir dir = readDirectory(b,null);
-
-        if (longNameEntries.size() > 0) {
-            StringBuffer stringBuffer = new StringBuffer();
-            for (int i = longNameEntries.size() - 1; i >= 0; i--) {
-                LongNameEntry e = longNameEntries.get(i);
-                stringBuffer.append(e.ldirName1);
-                stringBuffer.append(e.ldirName2);
-                stringBuffer.append(e.ldirName3);
-            }
-            dir.fileName = stringBuffer.toString().trim();
-        }
-        return dir;
-    }
-
     public List<Dir> readDirContent(Dir dir) {
         int cluster = dir.getCluNum();
         ByteBuffer byteBuffer = readClusterContent(cluster);
@@ -285,35 +233,6 @@ public class Fat32Reader {
         }
     }
 
-    public LongNameEntry readLongNameDir(ByteBuffer b) {
-        LongNameEntry longNameEntry = new LongNameEntry();
-        b.order(ByteOrder.LITTLE_ENDIAN);
-        longNameEntry.ldirOrd = (b.get() & 0xff);
-        if (longNameEntry.ldirOrd <= 0) {
-            throw new IllegalStateException();
-        }
-        assert longNameEntry.ldirOrd > 0;
-        boolean end = readToChars(longNameEntry.ldirName1, b, 5);
-        longNameEntry.ldirAttr = b.get();
-        longNameEntry.ldirType = b.get();
-        assert longNameEntry.ldirType == 0;
-        longNameEntry.ldirChksum = b.get();
-        if (end) {
-            b.position(b.position() + 6 * 2);
-        } else {
-            end = readToChars(longNameEntry.ldirName2, b, 6);
-        }
-        readToBytes(longNameEntry.ldirFstClusLO, b, 2);
-        assert longNameEntry.ldirFstClusLO[0] == 0;
-        assert longNameEntry.ldirFstClusLO[1] == 0;
-        if (end) {
-            b.position(b.position() + 2 * 2);
-        } else {
-            readToChars(longNameEntry.ldirName3, b, 2);
-        }
-        return longNameEntry;
-    }
-
     public Dir readDirectory(ByteBuffer b,List<FatDirEntry> longNameEntries) {
         Dir dir = new Dir();
         b.order(ByteOrder.LITTLE_ENDIAN);
@@ -340,7 +259,13 @@ public class Fat32Reader {
             }
             dir.fileName = stringBuffer.toString();
         }else{
-            dir.fileName = new String(dir.dirName);
+            String prefix = new String(dir.dirName,0,8);
+            String suffix = new String(dir.dirName,8,3);
+            if (suffix.equals("   ")) {
+                dir.fileName = prefix;
+            }else{
+                dir.fileName = prefix + "." + suffix;
+            }
         }
         assert dir.dirNTRes == 0;
         return dir;
