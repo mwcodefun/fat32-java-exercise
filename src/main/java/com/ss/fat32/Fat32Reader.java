@@ -1,5 +1,7 @@
 package com.ss.fat32;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
@@ -130,7 +132,7 @@ public class Fat32Reader {
         private String fileName;
 
         public int getCluNum() {
-            return fstClusLO & 0xff | fstClusHI << 16;
+            return fstClusLO & 0xffff | (fstClusHI & 0xffff) << 16;
         }
 
         @Override
@@ -163,14 +165,16 @@ public class Fat32Reader {
 
     RandomAccessFile randomAccessFile;
 
+    public static final int FAT_ENTRY_SIZE = 32;
+
     public List<Dir> readClusterDir(int cluster) {
         ByteBuffer byteBuffer = readClusterContent(cluster);
-        int entrySize = byteBuffer.capacity() / 32;
+        int clusCnt = byteBuffer.capacity() / 32;
         List<Dir> ans = new ArrayList<>();
         int i = 0;
         List<FatDirEntry> entries = new ArrayList<>();
-        while (i < entrySize) {
-            ByteBuffer entry = byteBuffer.slice(i * 32, 32);
+        while (i < clusCnt) {
+            ByteBuffer entry = byteBuffer.slice(i * FAT_ENTRY_SIZE, FAT_ENTRY_SIZE);
             byteBuffer.position(byteBuffer.position() + 32);
             i++;
             FatDirEntry fatDirEntry = new FatDirEntry(entry);
@@ -185,11 +189,62 @@ public class Fat32Reader {
                 if (entries != null && entries.size() != 0) {
                     entries = new ArrayList<>();
                 }
+                if (dir1.dirName[0] == 0xe5){
+                    //dir is free
+                    continue;
+                }
+                if (dir1.dirName[0] < 0x20){
+                    continue;
+                }
+                if (dir1.dirName[0] == 0x00){
+                    //all follow this entry dir is free
+                    break;
+                }
                 ans.add(dir1);
             }
         }
         return ans;
     }
+
+    public void writeContent(Dir dir,FileChannel fileChannel) throws IOException {
+        assert (dir.dirAttr & 0x10) != 1;
+        int cluNum = dir.getCluNum();
+        long size = dir.dirFileSize;
+        while (true){
+            if (cluNum == 0x0){
+                break;
+            }
+            if(cluNum == BAD_CLUSTER_ID){
+                break;
+            }
+            if (cluNum >= 0x02 && cluNum <= this.maxCluster){
+                ByteBuffer byteBuffer = readClusterContent(cluNum);
+                if (byteBuffer.capacity() > size){
+                    byteBuffer.limit((int) size);
+                    size = 0;
+                }else{
+                    size = size - byteBuffer.capacity();
+                }
+                fileChannel.write(byteBuffer,fileChannel.size());
+                cluNum = readFatEntry(cluNum);
+            }else{
+                break;
+            }
+        }
+    }
+
+    public void saveToAnotherFile(Dir dir, File file){
+        try {
+            FileOutputStream fos = new FileOutputStream(file);
+            FileChannel channel = fos.getChannel();
+            writeContent(dir,channel);
+            channel.close();
+            fos.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
 
     public List<Dir> readDirContent(Dir dir){
         int clusterNum = dir.getCluNum();
@@ -225,7 +280,11 @@ public class Fat32Reader {
         System.out.println("root dir=" + dir + "\nrootClu=" + dir.getCluNum());
         List<Dir> dirs1 = readDirContent(dir);
         for (Dir dir1 : dirs1) {
-            System.out.println(dir1.fileName);
+            System.out.println(dir1.fileName + ((dir1.dirAttr & 0x10) == 1 ? "is a dir": "is a file"));
+            if (dir1.fileName.equals("vXyZkWFGf486oGM.bmp")){
+                File file = new File("vXyZkWFGf486oGM.bmp");
+                saveToAnotherFile(dir1,file);
+            }
         }
         System.out.println("total=" + dirs1.size());
     }
@@ -349,6 +408,38 @@ public class Fat32Reader {
         this.fileChannel.close();
         this.randomAccessFile.close();
     }
+
+    private int[] clusterTag;
+
+    public void fileCov(){
+        this.clusterTag = new int[(int)maxCluster + 1];
+        for (int i = 2;i < maxCluster;i++){
+            ByteBuffer byteBuffer = readClusterContent(i);
+            String s = new String(byteBuffer.array());
+            byte[] header = new byte[2];
+            byteBuffer.get(0,header);
+            if (header[0] == 0x42 && header[1] == 0x4d) {
+                System.out.println("find bmp header");
+                clusterTag[i] = 2;
+            }
+            if (s.contains("bmp")){
+                System.out.println("find dir");
+                clusterTag[i] = 1;
+            }
+        }
+        for (int i = 2;i < maxCluster;i++){
+            if (clusterTag[i] == 1){
+                //maybe long name last entry
+                ByteBuffer byteBuffer = readClusterContent(i);
+                byte attr = byteBuffer.get(12);
+                if (attr == ATTR_LONG_NAME){
+                    //this is last long name
+                }
+
+            }
+        }
+    }
+
 
     public static void main(String[] args) throws IOException {
         Fat32Reader fat32Reader = new Fat32Reader();

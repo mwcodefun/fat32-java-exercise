@@ -11,6 +11,8 @@ public class FatDirEntry {
 
     public LongNameEntry longNameEntry;
 
+    public Fat32Reader.Dir dir;
+
     public FatDirEntry(ByteBuffer b){
         b.order(ByteOrder.LITTLE_ENDIAN);
         byte attr = b.get(11);
@@ -33,6 +35,9 @@ public class FatDirEntry {
             assert longNameEntry.ldirFstClusLO[0] == 0;
             assert longNameEntry.ldirFstClusLO[1] == 0;
             readChars(longNameEntry.ldirName3, b, 2);
+        }else{
+            dir = new Fat32Reader.Dir();
+
         }
     }
     private void readToBytes(byte[] dst, ByteBuffer src, int length) {
