@@ -11,13 +11,13 @@ public class FatDirEntry {
 
     public LongNameEntry longNameEntry;
 
-    public Fat32Reader.Dir dir;
+    public Fat32System.Dir dir;
 
     public FatDirEntry(ByteBuffer b){
         b.order(ByteOrder.LITTLE_ENDIAN);
         byte attr = b.get(11);
         //long name
-        if ((attr == Fat32Reader.ATTR_LONG_NAME)){
+        if ((attr == Fat32System.ATTR_LONG_NAME)){
             this.isLongNameEntry = true;
         }
         if (isLongNameEntry){
@@ -36,7 +36,7 @@ public class FatDirEntry {
             assert longNameEntry.ldirFstClusLO[1] == 0;
             readChars(longNameEntry.ldirName3, b, 2);
         }else{
-            dir = new Fat32Reader.Dir();
+            dir = new Fat32System.Dir();
 
         }
     }

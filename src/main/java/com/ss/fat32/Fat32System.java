@@ -9,11 +9,10 @@ import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.StringJoiner;
 
-public class Fat32Reader {
+public class Fat32System {
 
     public static byte ATTR_READ_ONLY = 0x01;
     public static byte ATTR_HIDDEN = 0x02;
@@ -21,99 +20,6 @@ public class Fat32Reader {
     public static byte ATTR_VOLUME_ID = 0x08;
     public static byte ATTR_LONG_NAME = 0x0f;
 
-    public static class BpbHeader {
-        private byte[] jmpBoot = new byte[3];
-        private byte[] oemName = new byte[8];
-        private int bytesPerSec;
-        private int secPerClu;
-        private int rsvdSecCnt;
-        private int numFats;
-        private int rootEntCnt;
-        private int totSec16;
-        private byte media;
-        private int fatSz16;
-        private int secPerTrk;
-
-        private int fatSz32;
-        private int extFlags;
-        private int fsVer;
-
-        private int rootClus;
-        private int fsInfo;
-        private int bkBootSec;
-        private int numHeads;
-        private long hiddSec;
-        private long totSec32;
-
-        @Override
-        public String toString() {
-            return new StringJoiner(", ", BpbHeader.class.getSimpleName() + "[", "]")
-                    .add("jmpBoot=" + Arrays.toString(jmpBoot))
-                    .add("oemName=" + Arrays.toString(oemName))
-                    .add("bytesPerSec=" + bytesPerSec)
-                    .add("secPerClu=" + secPerClu)
-                    .add("rsvdSecCnt=" + rsvdSecCnt)
-                    .add("numFats=" + numFats)
-                    .add("rootEntCnt=" + rootEntCnt)
-                    .add("totSec16=" + totSec16)
-                    .add("media=" + media)
-                    .add("fatSz16=" + fatSz16)
-                    .add("secPerTrk=" + secPerTrk)
-                    .add("fatSz32=" + fatSz32)
-                    .add("extFlags=" + extFlags)
-                    .add("fsVer=" + fsVer)
-                    .add("rootClus=" + rootClus)
-                    .add("fsInfo=" + fsInfo)
-                    .add("bkBootSec=" + bkBootSec)
-                    .toString();
-        }
-
-        public static long readUnsignedInt(ByteBuffer buffer){
-            byte b = buffer.get();
-            byte b1 = buffer.get();
-            byte b2 = buffer.get();
-            byte b3 = buffer.get();
-            return b & 0xFF | (b1 & 0xFF) << 8 | (b2 & 0xFF) << 16 | (b3 & 0xFF) << 24;
-        }
-
-        public static BpbHeader READ_FROM_BUFFER(ByteBuffer buffer) {
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            BpbHeader bpbHeader = new BpbHeader();
-            bpbHeader.jmpBoot[0] = buffer.get();
-            bpbHeader.jmpBoot[1] = buffer.get();
-            bpbHeader.jmpBoot[2] = buffer.get();
-
-            for (int i = 0; i < bpbHeader.oemName.length; i++) {
-                bpbHeader.oemName[i] = buffer.get();
-            }
-            bpbHeader.bytesPerSec = read2Bytes(buffer);
-            bpbHeader.secPerClu = buffer.get();
-            bpbHeader.rsvdSecCnt = read2Bytes(buffer);
-            bpbHeader.numFats = buffer.get();
-            bpbHeader.rootEntCnt = read2Bytes(buffer);
-            bpbHeader.totSec16 = read2Bytes(buffer);
-            bpbHeader.media = buffer.get();
-            bpbHeader.fatSz16 = read2Bytes(buffer);
-            bpbHeader.secPerTrk = read2Bytes(buffer);
-            bpbHeader.numHeads = read2Bytes(buffer);
-            bpbHeader.hiddSec = readUnsignedInt(buffer);
-            bpbHeader.totSec32 = readUnsignedInt(buffer);
-            byte[] totSec32 = new byte[4];
-            int position = buffer.position();
-            buffer.position(0);
-            buffer.get(32,totSec32);
-            buffer.position(position);
-            System.out.println(Utils.toInt(totSec32));
-
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            bpbHeader.fatSz32 = buffer.getInt();
-            bpbHeader.extFlags = read2Bytes(buffer);
-            bpbHeader.fsVer = read2Bytes(buffer);
-            assert bpbHeader.fsVer == 0;
-            bpbHeader.rootClus = buffer.getInt();
-            return bpbHeader;
-        }
-    }
 
     public static class Dir {
         private byte[] dirName = new byte[11];
@@ -157,7 +63,7 @@ public class Fat32Reader {
 
     MappedByteBuffer mappedByteBuffer;
 
-    BpbHeader bpbHeader;
+    private BpbHeader bpbHeader;
 
     private long maxCluster;
     private static int BAD_CLUSTER_ID = 0xffffff7;
@@ -272,9 +178,9 @@ public class Fat32Reader {
         this.fileChannel = this.randomAccessFile.getChannel();
         this.mappedByteBuffer = this.fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, this.fileChannel.size());
         MappedByteBuffer firstSector = this.mappedByteBuffer.slice(0, 512);
-        this.bpbHeader = BpbHeader.READ_FROM_BUFFER(firstSector);
-        long dataSector = this.bpbHeader.totSec32 - this.bpbHeader.rsvdSecCnt - this.bpbHeader.numFats * this.bpbHeader.fatSz32;
-        this.maxCluster = dataSector / this.bpbHeader.secPerClu;
+        this.bpbHeader = new BpbHeader();
+        this.bpbHeader.read(mappedByteBuffer);
+        this.maxCluster = this.bpbHeader.totClus();
         assert this.maxCluster > 0;
         Dir dir = readRootDir();
         System.out.println("root dir=" + dir + "\nrootClu=" + dir.getCluNum());
@@ -434,6 +340,7 @@ public class Fat32Reader {
                 byte attr = byteBuffer.get(12);
                 if (attr == ATTR_LONG_NAME){
                     //this is last long name
+                    //read next until dir struct entry
                 }
 
             }
@@ -442,8 +349,8 @@ public class Fat32Reader {
 
 
     public static void main(String[] args) throws IOException {
-        Fat32Reader fat32Reader = new Fat32Reader();
-        fat32Reader.read("/Users/ss/fat32/img");
+        Fat32System fat32System = new Fat32System();
+        fat32System.read("/Users/ss/fat32/img");
     }
 
 }
